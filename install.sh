@@ -4,7 +4,7 @@ set -e
 export DEBIAN_FRONTEND=noninteractive
 
 apt update && apt upgrade -y
-apt install -y curl wget git unzip software-properties-common \
+apt install -y curl wget sudo git unzip software-properties-common \
   apt-transport-https ca-certificates gnupg lsb-release
 
 timedatectl set-timezone Asia/Shanghai
