@@ -131,7 +131,7 @@ tar -zxvf ppanel-server-linux-amd64.tar.gz
 sudo mv ppanel-server /usr/local/bin/ppanel-server
 sudo mkdir -p /usr/local/etc/ppanel
 sudo mv ./etc/ppanel.yaml /usr/local/etc/ppanel/
-sudo chmod +x /usr/local/bin/ppanel
+sudo chmod +x /usr/local/bin/ppanel-server
 AccessSecret=$(openssl rand -base64 16)
 cat > /usr/local/etc/ppanel/ppanel.yaml <<EOF
 Host: 127.0.0.1
