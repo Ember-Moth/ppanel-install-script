@@ -1,35 +1,62 @@
 #!/bin/bash
+set -e
 
-apt update
-apt install -y curl wget gnupg2 ca-certificates lsb-release sudo apt-transport-https
+export DEBIAN_FRONTEND=noninteractive
 
-curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor | sudo tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
-echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] http://nginx.org/packages/mainline/debian $(lsb_release -cs) nginx" | sudo tee /etc/apt/sources.list.d/nginx.list
-echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" | sudo tee /etc/apt/preferences.d/99nginx
+apt update && apt upgrade -y
+apt install -y curl wget git unzip software-properties-common \
+  apt-transport-https ca-certificates gnupg lsb-release
 
-curl -fsSL https://packages.redis.io/gpg | sudo gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] https://packages.redis.io/deb $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/redis.list
+timedatectl set-timezone Asia/Shanghai
+
+curl https://nginx.org/keys/nginx_signing.key | gpg --dearmor \
+  | tee /usr/share/keyrings/nginx-archive-keyring.gpg >/dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/nginx-archive-keyring.gpg] \
+  http://nginx.org/packages/mainline/debian bookworm nginx" \
+  | tee /etc/apt/sources.list.d/nginx.list
+
+echo -e "Package: *\nPin: origin nginx.org\nPin: release o=nginx\nPin-Priority: 900\n" \
+  | tee /etc/apt/preferences.d/99nginx
+
+apt update && apt install -y nginx
+
+sed -i 's/^user.*/user www-data;/' /etc/nginx/nginx.conf
+
+systemctl start nginx && systemctl enable nginx
+
+curl -fsSL https://packages.redis.io/gpg | gpg --dearmor -o /usr/share/keyrings/redis-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/redis-archive-keyring.gpg] \
+  https://packages.redis.io/deb bookworm main" | tee /etc/apt/sources.list.d/redis.list
+
+apt update && apt install -y redis
+
+sed -i 's/^# bind 127.0.0.1 ::1/bind 127.0.0.1 ::1/' /etc/redis/redis.conf
+sed -i 's/^# maxmemory <bytes>/maxmemory 256mb/' /etc/redis/redis.conf
+sed -i 's/^# maxmemory-policy noeviction/maxmemory-policy allkeys-lru/' /etc/redis/redis.conf
+
+systemctl restart redis-server && systemctl enable redis-server
 
 mkdir -p /etc/apt/keyrings
-curl -o /etc/apt/keyrings/mariadb-keyring.pgp 'https://mariadb.org/mariadb_release_signing_key.pgp'
-echo "X-Repolib-Name: MariaDB" | sudo tee /etc/apt/sources.list.d/mariadb.sources
-echo "Types: deb" | sudo tee -a /etc/apt/sources.list.d/mariadb.sources
-echo "URIs: https://deb.mariadb.org/11.4/debian" | sudo tee -a /etc/apt/sources.list.d/mariadb.sources
-echo "Suites: bookworm" | sudo tee -a /etc/apt/sources.list.d/mariadb.sources
-echo "Components: main" | sudo tee -a /etc/apt/sources.list.d/mariadb.sources
-echo "Signed-By: /etc/apt/keyrings/mariadb-keyring.pgp" | sudo tee -a /etc/apt/sources.list.d/mariadb.sources
+curl -o /etc/apt/keyrings/mariadb-keyring.pgp \
+  'https://mariadb.org/mariadb_release_signing_key.pgp'
 
-apt update
+cat > /etc/apt/sources.list.d/mariadb.sources <<EOF
+X-RepoLib-Name: MariaDB
+Types: deb
+URIs: https://deb.mariadb.org/11.8/debian
+Suites: bookworm
+Components: main
+Signed-By: /etc/apt/keyrings/mariadb-keyring.pgp
+EOF
 
-apt install -y nginx redis-server mariadb-server jq
+# 安装 MariaDB
+apt update && apt install -y mariadb-server mariadb-client
 
-systemctl start nginx
-systemctl enable nginx
-systemctl start redis-server
-systemctl enable redis-server
-systemctl start mariadb
-systemctl enable mariadb
+# 启动服务
+systemctl start mariadb && systemctl enable mariadb
 
+# 安全初始化
 mariadb-secure-installation <<EOF
 \n
 n
@@ -40,29 +67,29 @@ y
 y
 EOF
 
-read -p "请输入要创建的数据库名称: " dbname
-read -p "请创建数据库用户名: " dbuser
-read -p "请创建数据库用户密码: " dbpass
-echo
+# 生成安全密码
+DB_PASSWORD=$(openssl rand -base64 16)
+echo "请牢记数据库密码！！！ 数据库密码：$DB_PASSWORD"
 
+# 创建数据库和用户（使用 mariadb 命令，避免弃用警告）
 mariadb -u root <<EOF
-CREATE DATABASE $dbname CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-CREATE USER '$dbuser'@'localhost' IDENTIFIED BY '$dbpass';
-GRANT ALL PRIVILEGES ON $dbname.* TO '$dbuser'@'localhost';
+CREATE DATABASE ppanel_db CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+ALTER USER 'root'@'localhost' IDENTIFIED BY '$DB_PASSWORD';
 FLUSH PRIVILEGES;
 EOF
 
-sed -i 's/user nginx;/user www-data;/g' /etc/nginx/nginx.conf
+# 创建配置目录
+mkdir -p /etc/nginx/conf.d
 
-read -p "请输入要监听的域名（若无可用域名请回车跳过）: " server_name
-server_name=${server_name:-_}
+read -p "请输入后台API地址: " domain
 
-cat > /etc/nginx/conf.d/default.conf <<EOF
+# 创建站点配置
+cat > /etc/nginx/conf.d/ppanel.conf <<EOF
 server {
     listen 80;
-    server_name $server_name;
+    listen [::]:80;
+    server_name $domain;
 
-    # 默认代理设置
     location / {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -73,11 +100,9 @@ server {
 
         add_header X-Cache \$upstream_cache_status;
 
-        # 配置代理到后端服务
         proxy_pass http://127.0.0.1:8080;
     }
 
-    # 设置静态资源缓存
     location ~* \.(gif|png|jpg|css|js|woff|woff2)$ {
         expires 30d;
         add_header Cache-Control public;
@@ -85,50 +110,64 @@ server {
 }
 EOF
 
-systemctl restart nginx
 
-LATEST_VERSION=$(curl -s https://api.github.com/repos/perfect-panel/ppanel/releases/latest | jq -r .tag_name)
-DOWNLOAD_URL="https://github.com/perfect-panel/ppanel/releases/download/$LATEST_VERSION/ppanel-server-$LATEST_VERSION-linux-amd64.tar.gz"
-wget $DOWNLOAD_URL -O ppanel-server-latest.tar.gz
-tar -zxvf ppanel-server-latest.tar.gz
-rm ppanel-server-latest.tar.gz
-sudo mv ppanel-server /usr/local/bin/ppanel
+# 测试配置
+nginx -t
+
+# 重载 Nginx
+systemctl reload nginx
+
+# 安装 Certbot
+apt install -y certbot python3-certbot-nginx
+
+# 获取证书
+certbot --nginx -d $domain --non-interactive --agree-tos -m admin@$domain
+
+wget -O ppanel-server-linux-amd64.tar.gz \
+  https://github.com/perfect-panel/server/releases/latest/download/ppanel-server-linux-amd64.tar.gz
+
+tar -zxvf ppanel-server-linux-amd64.tar.gz
+
+sudo mv ppanel-server /usr/local/bin/ppanel-server
 sudo mkdir -p /usr/local/etc/ppanel
 sudo mv ./etc/ppanel.yaml /usr/local/etc/ppanel/
 sudo chmod +x /usr/local/bin/ppanel
-rm LICENSE
-rm -rf etc
-
+AccessSecret=$(openssl rand -base64 16)
 cat > /usr/local/etc/ppanel/ppanel.yaml <<EOF
 Host: 127.0.0.1
 Port: 8080
 Debug: false
+
 JwtAuth:
-  AccessSecret: d2a1b58958f13ab01shekdd123fcd12345xyz67890==
+  AccessSecret: $AccessSecret
   AccessExpire: 604800
+
 Logger:
-  FilePath: ./ppanel.log
+  FilePath: /var/log/ppanel/ppanel.log
   MaxSize: 50
   MaxBackup: 3
   MaxAge: 30
   Compress: true
   Level: info
+
 MySQL:
   Addr: 127.0.0.1:3306
-  Username: $dbuser
-  Password: $dbpass
-  Dbname: $dbname
+  Username: root
+  Password: $DB_PASSWORD
+  Dbname: ppanel_db
   Config: charset=utf8mb4&parseTime=true&loc=Asia%2FShanghai
   MaxIdleConns: 10
   MaxOpenConns: 100
   LogMode: info
   LogZap: true
   SlowThreshold: 1000
+
 Redis:
   Host: 127.0.0.1:6379
   Pass: ''
   DB: 0
-Administer:
+
+Administrator:
   Email: admin@ppanel.dev
   Password: password
 EOF
@@ -139,7 +178,7 @@ Description=PPANEL Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/ppanel run --config /usr/local/etc/ppanel/ppanel.yaml
+ExecStart=/usr/local/bin/ppanel-server run --config /usr/local/etc/ppanel/ppanel.yaml
 Restart=always
 User=root
 WorkingDirectory=/usr/local/bin
@@ -149,16 +188,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable ppanel
 systemctl start ppanel
+systemctl enable ppanel
 
-if systemctl is-active --quiet ppanel; then
-    if [ "$server_name" = "_" ]; then
-        public_ip=$(curl -4 -s ifconfig.me)
-        echo "ppanel安装成功! 您的API地址为：http://$public_ip"
-    else
-        echo "ppanel安装成功！您的API地址为：http://$server_name"
-    fi
-else
-    echo "ppanel安装失败！"
-fi
+echo "您的管理员账户为：admin@ppanel.dev 密码为：password ，请登陆后台后及时修改管理员账户和密码"
